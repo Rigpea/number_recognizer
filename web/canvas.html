@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Number Recognizer – Canvas</title>
+  <style>
+    :root {
+      --bg: #0b0b0b;   /* page background */
+      --panel: #141414;/* control panel */
+      --ink: #ffffff;  /* brush color */
+      --accent: #6ad1ff;
+      --muted: #888;
+    }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: #eaeaea; font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .wrap { display: grid; grid-template-columns: auto 360px; gap: 18px; padding: 18px; align-items: start; }
+    .board { display: grid; gap: 10px; justify-items: start; }
+    canvas#pad { background: #000; border-radius: 12px; box-shadow: 0 0 0 1px #222, 0 8px 24px rgba(0,0,0,.6); width: 280px; height: 280px; touch-action: none; cursor: crosshair; }
+    .panel { background: var(--panel); border-radius: 12px; padding: 14px; box-shadow: 0 0 0 1px #222; }
+    .row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; margin: 10px 0; }
+    .row label { color: #cfcfcf; }
+    .btns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
+    button, select { background: #1f1f1f; color: #eaeaea; border: 1px solid #2b2b2b; border-radius: 10px; padding: 10px 12px; font-weight: 600; }
+    button:hover { border-color: var(--accent); }
+    input[type="range"] { width: 100%; }
+    .meta { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .kbd { font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#111; border:1px solid #2b2b2b; padding:2px 6px; border-radius:6px; color:#cbd5e1 }
+    .footer { color:#aaa; font-size:12px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="board">
+      <canvas id="pad" width="280" height="280" aria-label="Digit drawing area"></canvas>
+      <div class="meta">White ink on black, 280×280. Export resamples to 28×28.</div>
+    </div>
+
+    <div class="panel">
+      <div class="row">
+        <label for="labelSel">Label</label>
+        <select id="labelSel" title="Digit label">
+          <option value="0">0</option>
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5" selected>5</option>
+          <option value="6">6</option>
+          <option value="7">7</option>
+          <option value="8">8</option>
+          <option value="9">9</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label for="brush">Brush <span id="brushVal" class="kbd">20</span></label>
+        <input type="range" id="brush" min="4" max="40" value="20" step="1" />
+      </div>
+
+      <div class="btns">
+        <button id="undoBtn" title="Undo (Z)">Undo</button>
+        <button id="clearBtn" title="Clear (C)">Clear</button>
+        <button id="exportBtn" title="Export 28×28 (E)">Export 28×28</button>
+      </div>
+
+      <div class="footer">
+        Shortcuts: <span class="kbd">Z</span> Undo · <span class="kbd">C</span> Clear · <span class="kbd">E</span> Export
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ===== High-DPI aware canvas setup =====
+    const pad = document.getElementById('pad');
+    const ctx = pad.getContext('2d');
+    const DPR = window.devicePixelRatio || 1;
+
+    function setupCanvas() {
+      // Keep CSS size at 280×280, but scale backing store for crisp strokes
+      const cssSize = 280;
+      pad.style.width = cssSize + 'px';
+      pad.style.height = cssSize + 'px';
+      pad.width = Math.round(cssSize * DPR);
+      pad.height = Math.round(cssSize * DPR);
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      // Fill black background
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, cssSize, cssSize);
+    }
+    setupCanvas();
+
+    // ===== Drawing state =====
+    let drawing = false;
+    let brush = 20;
+    const strokes = []; // each stroke: [{x,y,brush}, ...]
+    let currentStroke = null;
+
+    const brushSlider = document.getElementById('brush');
+    const brushVal = document.getElementById('brushVal');
+    brushSlider.addEventListener('input', e => {
+      brush = parseInt(e.target.value, 10);
+      brushVal.textContent = brush;
+    });
+
+    function getPos(evt) {
+      const rect = pad.getBoundingClientRect();
+      const clientX = (evt.touches ? evt.touches[0].clientX : evt.clientX);
+      const clientY = (evt.touches ? evt.touches[0].clientY : evt.clientY);
+      return {
+        x: Math.max(0, Math.min(280, clientX - rect.left)),
+        y: Math.max(0, Math.min(280, clientY - rect.top))
+      };
+    }
+
+    function drawAll() {
+      // Clear to black then redraw every stroke
+      ctx.save();
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, 280, 280);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = '#fff';
+      for (const stroke of strokes) {
+        if (stroke.length < 2) continue;
+        ctx.beginPath();
+        ctx.lineWidth = stroke[0].brush;
+        ctx.moveTo(stroke[0].x, stroke[0].y);
+        for (let i = 1; i < stroke.length; i++) {
+          ctx.lineWidth = stroke[i].brush;
+          ctx.lineTo(stroke[i].x, stroke[i].y);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function startDraw(evt) {
+      drawing = true;
+      currentStroke = [];
+      strokes.push(currentStroke);
+      const {x,y} = getPos(evt);
+      currentStroke.push({x,y,brush});
+      drawAll();
+      evt.preventDefault();
+    }
+    function moveDraw(evt) {
+      if (!drawing) return;
+      const {x,y} = getPos(evt);
+      currentStroke.push({x,y,brush});
+      drawAll();
+      evt.preventDefault();
+    }
+    function endDraw(evt) {
+      drawing = false;
+      currentStroke = null;
+      evt && evt.preventDefault();
+    }
+
+    // Mouse
+    pad.addEventListener('mousedown', startDraw);
+    pad.addEventListener('mousemove', moveDraw);
+    window.addEventListener('mouseup', endDraw);
+    // Touch
+    pad.addEventListener('touchstart', startDraw, {passive:false});
+    pad.addEventListener('touchmove', moveDraw, {passive:false});
+    pad.addEventListener('touchend', endDraw, {passive:false});
+
+    // ===== Controls =====
+    document.getElementById('undoBtn').addEventListener('click', () => {
+      if (strokes.length > 0) { strokes.pop(); drawAll(); }
+    });
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      strokes.length = 0; drawAll();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'z' || e.key === 'Z') { if (strokes.length>0) {strokes.pop(); drawAll();} }
+      if (e.key === 'c' || e.key === 'C') { strokes.length = 0; drawAll(); }
+      if (e.key === 'e' || e.key === 'E') { export28(); }
+    });
+
+    // ===== Export to 28×28 PNG =====
+    function timestamp() {
+      const d = new Date();
+      const pad2 = n => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}_${pad2(d.getHours())}-${pad2(d.getMinutes())}-${pad2(d.getSeconds())}`;
+    }
+
+    function export28() {
+      // Create offscreen 28×28 canvas, black bg, draw downscaled image
+      const small = document.createElement('canvas');
+      small.width = 28; small.height = 28;
+      const sctx = small.getContext('2d');
+      sctx.imageSmoothingEnabled = true; // bilinear-ish
+      // Fill black
+      sctx.fillStyle = '#000';
+      sctx.fillRect(0, 0, 28, 28);
+      // Draw current board scaled down
+      sctx.drawImage(pad, 0, 0, 28, 28);
+
+      // Force white-on-black sanity (in case of any alpha edges)
+      const imgData = sctx.getImageData(0, 0, 28, 28);
+      const data = imgData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        // Convert to grayscale by the red channel (they're equal)
+        const r = data[i];
+        // Clamp to 0..255, ensure background 0, ink near 255
+        data[i] = data[i+1] = data[i+2] = r; // already grayscale from drawImage
+        data[i+3] = 255; // opaque
+      }
+      sctx.putImageData(imgData, 0, 0);
+
+      const lbl = document.getElementById('labelSel').value || 'x';
+      const name = `${lbl}_${timestamp()}.png`;
+      small.toBlob((blob) => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        URL.revokeObjectURL(a.href);
+        a.remove();
+      }, 'image/png');
+    }
+
+    document.getElementById('exportBtn').addEventListener('click', export28);
+  </script>
+</body>
+</html>
